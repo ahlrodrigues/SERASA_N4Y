@@ -1,0 +1,8 @@
+python-dotenv
+selenium
+pandas
+openpyxl
+jinja2
+watchdog
+tabulate
+beautifulsoup4

@@ -1,0 +1,4 @@
+ 
+<a href="#fields_servico" class="ui-tabs-anchor" role="presentation" tabindex="-1" id="ui-id-2"> Consulta por Serviço </a>
+
+<span class="select2-selection select2-selection--multiple" role="combobox" aria-haspopup="true" aria-expanded="true" tabindex="-1" aria-owns="select2-id_tags-results" aria-activedescendant="select2-id_tags-result-4eeg-100104"><ul class="select2-selection__rendered"><li class="select2-search select2-search--inline"><input class="select2-search__field" type="search" tabindex="0" autocomplete="off" autocorrect="off" autocapitalize="none" spellcheck="false" role="textbox" aria-autocomplete="list" placeholder="" style="width: 0.75em;"></li></ul></span>
