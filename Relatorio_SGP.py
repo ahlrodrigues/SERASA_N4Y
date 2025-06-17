@@ -1,7 +1,9 @@
+
 import os
 import time
 import shutil
 import zipfile
+import socket
 from dotenv import load_dotenv
 from selenium import webdriver
 from selenium.webdriver.common.by import By
@@ -18,7 +20,6 @@ driver_path = "./chromedriver"
 nome_parcial = "cliente-"
 nome_final = "Relatorio_SGP.xlsx"
 
-# Pasta onde será feito o download
 download_dir = os.path.abspath("download")
 if not os.path.exists(download_dir):
     os.makedirs(download_dir)
@@ -26,15 +27,22 @@ if not os.path.exists(download_dir):
 else:
     print(f"[INFO] Usando pasta de download: {download_dir}")
 
-# Validação de credenciais
 if not LOGIN or not SENHA:
     print("[ERRO] USUARIO_SGP ou SENHA_SGP não definidos no .env")
     exit(1)
 
-# ===================== FUNÇÃO: ESPERAR DOWNLOAD =====================
+def verificar_porta_localhost(porta, timeout=2):
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.settimeout(timeout)
+        resultado = sock.connect_ex(('localhost', porta))
+        return resultado == 0
+
+if not verificar_porta_localhost(48589):
+    print("[AVISO] Serviço local na porta 48589 não está ativo ou demorando para responder.")
+
 def esperar_download_e_renomear():
     print("[INFO] Aguardando download do arquivo...")
-    timeout = 600  # 10 minutos
+    timeout = 600
     polling = 2
     tempo_inicio = time.time()
 
@@ -49,17 +57,15 @@ def esperar_download_e_renomear():
             original_path = os.path.join(download_dir, finalizados[0])
             destino_path = os.path.join(download_dir, nome_final)
 
-            # Valida se é um .xlsx válido (arquivo zip)
             try:
                 with zipfile.ZipFile(original_path, 'r') as zip_ref:
                     if zip_ref.testzip() is not None:
                         raise zipfile.BadZipFile("Erro ao ler conteúdo interno.")
             except zipfile.BadZipFile:
-                print("[ERRO] Arquivo .xlsx baixado está corrompido ou incompleto. Aguardando novo download...")
+                print("[ERRO] Arquivo .xlsx baixado está corrompido. Aguardando novo download...")
                 time.sleep(polling)
                 continue
 
-            # Verifica tamanho mínimo (10KB)
             if os.path.getsize(original_path) < 10240:
                 print("[ERRO] Arquivo baixado é muito pequeno. Aguardando novo download...")
                 time.sleep(polling)
@@ -74,7 +80,6 @@ def esperar_download_e_renomear():
     print("[ERRO] Tempo excedido esperando download.")
     return False
 
-# ===================== WEBDRIVER E DOWNLOAD =====================
 print("[INFO] Iniciando Chrome...")
 service = Service(driver_path)
 options = webdriver.ChromeOptions()
@@ -122,12 +127,15 @@ try:
     print("[INFO] Aguardando resultados...")
     time.sleep(5)
 
-    print("[INFO] Exportando para Excel...")
-    botao_excel = WebDriverWait(driver, 360).until(EC.element_to_be_clickable((By.ID, "idprintexcel")))
-    botao_excel.click()
-    print("[INFO] Clique no botão Excel efetuado.")
+    print("[INFO] Aguardando botão de exportação (até 1440s)...")
+    try:
+        botao_excel = WebDriverWait(driver, 1440).until(EC.element_to_be_clickable((By.ID, "idprintexcel")))
+        botao_excel.click()
+        print("[SUCESSO] Botão de exportação clicado.")
+    except Exception as e:
+        print(f"[ERRO] Timeout ao aguardar botão Excel: {e}")
+        raise
 
-    # Aguarda finalização do download
     if not esperar_download_e_renomear():
         raise Exception("Download não finalizado corretamente.")
 
