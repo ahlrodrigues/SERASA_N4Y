@@ -12,7 +12,6 @@ os.makedirs(saida_dir, exist_ok=True)
 caminho_cnm = os.path.join(caminho_dir, 'Relatorio_CNM.xlsx')
 caminho_sgp = os.path.join(caminho_dir, 'Relatorio_SGP.xlsx')
 
-# Arquivos de origem SOA
 arquivos_soa = {
     "Ativas": "Ativas.csv",
     "Baixadas": "Baixadas.csv",
@@ -21,9 +20,6 @@ arquivos_soa = {
     "Erros": "Erros.csv"
 }
 
-# === FUNÇÕES DE APOIO ===
-
-# Evita colunas duplicadas nos CSVs da SOA
 def deduplicar_colunas(cols):
     counter = Counter()
     novas = []
@@ -35,7 +31,6 @@ def deduplicar_colunas(cols):
             novas.append(f"{col}.{counter[col]-1}")
     return novas
 
-# Padroniza documentos (CPF/CNPJ) com 11 dígitos, preenchendo com zeros à esquerda
 def padronizar_documento_11_digitos(coluna):
     return (
         coluna.astype(str)
@@ -43,21 +38,15 @@ def padronizar_documento_11_digitos(coluna):
               .str.zfill(11)
     )
 
-# Lê e normaliza arquivos CSV da SOA
 def ler_e_normalizar_soa(nome, caminho_arquivo):
     print(f"[INFO] Lendo arquivo SOA: {nome} -> {caminho_arquivo}")
-    df = pd.read_csv(caminho_arquivo, encoding="utf-8")
+    df = pd.read_csv(caminho_arquivo, encoding="utf-8", dtype=str)
     raw_cols = list(df.columns)
-
-    # Limpeza de caracteres estranhos nas colunas
     cols = [html.unescape(col).replace('+ACI-', '').replace('+AC0-', '-').replace('"', '').strip() for col in raw_cols]
-
-    # Renomeia colunas duplicadas se necessário
     if len(set(cols)) < len(cols):
         print(f"[AVISO] Colunas duplicadas detectadas em {nome}. Renomeando...")
         cols = deduplicar_colunas(cols)
     df.columns = cols
-
     df = df.rename(columns={
         'Documento': 'documento',
         'Devedor': 'devedor',
@@ -66,13 +55,11 @@ def ler_e_normalizar_soa(nome, caminho_arquivo):
         'Data Inclusao': 'data',
         'Data Exclusão': 'data'
     })
-
     df = df.loc[:, ~df.columns.duplicated()]
     df['documento'] = padronizar_documento_11_digitos(df['documento'])
     df['fonte'] = nome
     return df
 
-# Carrega e prepara todos os dados de CNM, SGP e SOA
 def carregar_dados():
     if not os.path.exists(caminho_cnm) or not os.path.exists(caminho_sgp):
         print('[ERRO] Arquivo CNM ou SGP não encontrado.')
@@ -82,17 +69,12 @@ def carregar_dados():
     cnm_df = pd.read_excel(caminho_cnm, engine='openpyxl')
     sgp_df = pd.read_excel(caminho_sgp, skiprows=8)
 
-    print('[INFO] Normalizando documentos...')
     cnm_df['Documento'] = padronizar_documento_11_digitos(cnm_df['Documento'])
     sgp_df['CPF/CNPJ'] = padronizar_documento_11_digitos(sgp_df['CPF/CNPJ'])
 
     documentos_sgp = set(sgp_df['CPF/CNPJ'])
-    print(f'[INFO] Total de documentos únicos no SGP: {len(documentos_sgp)}')
 
-    print('[INFO] Aplicando lógica de status ao CNM...')
     cnm_df['Status'] = cnm_df.apply(lambda row: definir_status(row, documentos_sgp), axis=1)
-    print('[INFO] Contagem de status no CNM:')
-    print(cnm_df['Status'].value_counts())
 
     lista_soa = []
     for nome, arquivo in arquivos_soa.items():
@@ -106,11 +88,9 @@ def carregar_dados():
     soa_df = pd.concat(lista_soa, ignore_index=True) if lista_soa else pd.DataFrame(columns=["documento", "devedor", "data", "fonte", "Unique ID"])
     return cnm_df, sgp_df, soa_df
 
-# Define status com base em tipo e presença no SGP
 def definir_status(row, documentos_sgp):
     doc = row['Documento']
     tipo = str(row['Tipo']).strip().upper()
-
     if tipo.startswith("PF") or tipo.startswith("PJ"):
         return "SCORE"
     elif tipo == "INCLUSAO":
@@ -120,11 +100,9 @@ def definir_status(row, documentos_sgp):
     else:
         return "ERRO"
 
-# === DASHBOARD PRINCIPAL ===
 def gerar_dashboard():
     cnm_df, sgp_df, soa_df = carregar_dados()
     documentos = set(cnm_df['Documento']) | set(soa_df['documento']) | set(sgp_df['CPF/CNPJ'])
-    print(f"[INFO] Total de documentos únicos no universo: {len(documentos)}")
 
     dados = []
     for doc in documentos:
@@ -157,8 +135,8 @@ def gerar_dashboard():
         status = definir_status({'Documento': doc, 'Tipo': tipo}, set(sgp_df['CPF/CNPJ']))
 
         dados.append({
-            "ID": id_val,
-            "Documento": doc,
+            "ID": str(id_val),
+            "Documento": str(doc),
             "Nome": nome,
             "Data": data,
             "Tipo": tipo,
@@ -167,12 +145,14 @@ def gerar_dashboard():
         })
 
     df = pd.DataFrame(dados)
-    print(f"[INFO] Total de registros na tabela final: {len(df)}")
+    df["Documento"] = df["Documento"].astype(str)
+    df["ID"] = df["ID"].astype(str)
 
     df.to_excel(os.path.join(saida_dir, "resultado_unificado.xlsx"), index=False)
+    print("[SUCESSO] resultado_unificado.xlsx gerado com sucesso!")
+
     gerar_html(df)
 
-# === GERA HTML ===
 def gerar_html(df):
     html_tabela = df.to_html(index=False, escape=False, table_id='tabela', classes='display')
     subtitulos = {
@@ -219,6 +199,7 @@ def gerar_html(df):
                     const colunasParaFiltrar = {{
                         3: "Data",
                         4: "Tipo",
+                        5: "Local",
                         6: "Status"
                     }};
                     this.api().columns().every(function (index) {{
@@ -248,7 +229,7 @@ def gerar_html(df):
 </html>"""
     with open(os.path.join(saida_dir, "dashboard_unificado.html"), "w", encoding="utf-8") as f:
         f.write(html_code)
+    print("[SUCESSO] dashboard_unificado.html gerado com sucesso!")
 
-# Executa principal
 if __name__ == '__main__':
     gerar_dashboard()
