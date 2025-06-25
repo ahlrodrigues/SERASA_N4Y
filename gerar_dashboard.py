@@ -132,7 +132,11 @@ def gerar_dashboard():
             for origem, row in [('CNM', row_cnm), ('SOA', row_soa), ('SGP', row_sgp)]
         ])
 
-        status = definir_status({'Documento': doc, 'Tipo': tipo}, set(sgp_df['CPF/CNPJ']))
+        # ✅ Condicional nova: Baixadas no SOA define status como BAIXADO
+        if 'Baixadas' in fontes:
+            status = "BAIXADO"
+        else:
+            status = definir_status({'Documento': doc, 'Tipo': tipo}, set(sgp_df['CPF/CNPJ']))
 
         dados.append({
             "ID": str(id_val),
