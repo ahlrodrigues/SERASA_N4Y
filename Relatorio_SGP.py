@@ -120,12 +120,18 @@ try:
     time.sleep(2)
     campo_tag.send_keys(Keys.ENTER)
 
-    print("[INFO] Executando consulta...")
+    print("[INFO] Clicando duas vezes no botão 'Consultar'...")
+    botao_consulta = wait.until(EC.element_to_be_clickable((By.ID, "botao_consulta")))
+    botao_consulta.click()
+    time.sleep(1)
+
+    # Recarrega o botão após o clique (para evitar stale element)
     botao_consulta = wait.until(EC.element_to_be_clickable((By.ID, "botao_consulta")))
     botao_consulta.click()
 
+
     print("[INFO] Aguardando resultados...")
-    time.sleep(5)
+    time.sleep(10)
 
     print("[INFO] Aguardando botão de exportação (até 1440s)...")
     try:
