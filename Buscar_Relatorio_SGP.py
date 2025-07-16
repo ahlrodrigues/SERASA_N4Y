@@ -1,4 +1,3 @@
-
 import os
 import time
 import shutil
@@ -109,29 +108,40 @@ try:
     botao_entrar.click()
     print("[INFO] Login concluído.")
 
-    print("[INFO] Abrindo aba de TAGs...")
-    aba_tag = wait.until(EC.element_to_be_clickable((By.ID, "ui-id-2")))
-    aba_tag.click()
+    print("[INFO] Acessando aba 'Consulta por Serviço'...")
+    aba_servico = wait.until(EC.element_to_be_clickable((By.XPATH, "//a[contains(text(),'Consulta por Serviço')]")))
+    driver.execute_script("arguments[0].scrollIntoView(true);", aba_servico)
+    time.sleep(1)
+    aba_servico.click()
+    print("[INFO] Aba 'Consulta por Serviço' ativada.")
 
     print("[INFO] Selecionando TAG NEGATIVADO...")
-    campo_tag = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, '.select2-search__field')))
-    campo_tag.click()
-    campo_tag.send_keys("NEGATIVADO")
-    time.sleep(2)
-    campo_tag.send_keys(Keys.ENTER)
-
-    print("[INFO] Clicando duas vezes no botão 'Consultar'...")
-    botao_consulta = wait.until(EC.element_to_be_clickable((By.ID, "botao_consulta")))
-    botao_consulta.click()
+    campo_tag_trigger = wait.until(EC.element_to_be_clickable((By.XPATH, "//span[@class='select2-selection select2-selection--multiple']")))
+    campo_tag_trigger.click()
     time.sleep(1)
 
-    # Recarrega o botão após o clique (para evitar stale element)
+    campo_tag_input = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, '.select2-search__field')))
+    campo_tag_input.send_keys("NEGATIVADO")
+    time.sleep(2)
+
+    opcao_negativado = wait.until(EC.element_to_be_clickable((By.XPATH, "//li[contains(@class, 'select2-results__option') and text()='NEGATIVADO']")))
+    opcao_negativado.click()
+
+    print("[INFO] Aguardando 30 segundos para conferência manual da seleção da TAG...")
+    time.sleep(30)
+
+    print("[INFO] Clicando no botão 'Consultar'...")
     botao_consulta = wait.until(EC.element_to_be_clickable((By.ID, "botao_consulta")))
-    botao_consulta.click()
 
+    driver.execute_script("arguments[0].scrollIntoView(true);", botao_consulta)
+    time.sleep(0.5)
 
-    print("[INFO] Aguardando resultados...")
-    time.sleep(10)
+    try:
+        botao_consulta.click()
+    except Exception:
+        driver.execute_script("arguments[0].click();", botao_consulta)
+
+    print("[INFO] Clique no botão 'Consultar' executado com sucesso.")
 
     print("[INFO] Aguardando botão de exportação (até 1440s)...")
     try:

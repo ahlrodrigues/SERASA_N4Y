@@ -8,8 +8,71 @@ from selenium.webdriver.chrome.options import Options
 from dotenv import load_dotenv
 import os
 import time
+import subprocess
+import zipfile
+import urllib.request
+import shutil
+import platform
+
+# ==== Função para instalar ChromeDriver compatível ====
+
+def instalar_chromedriver_compatível(driver_path="./chromedriver"):
+    print("🔍 Verificando versão do Google Chrome instalada...")
+    try:
+        resultado = subprocess.run(
+            ["/opt/google/chrome/chrome", "--version"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=True
+        )
+        versao_completa = resultado.stdout.strip().split()[-1]  # ex: "138.0.7204.100"
+        versao_principal = versao_completa.split(".")[0]        # ex: "138"
+        print(f"✅ Chrome instalado: versão {versao_completa}")
+    except Exception as e:
+        print("❌ Não foi possível obter a versão do Google Chrome:", e)
+        return False
+
+    print(f"🌐 Buscando ChromeDriver compatível com versão {versao_principal}...")
+
+    sistema = platform.system().lower()
+    if sistema != "linux":
+        print("❌ Este instalador automático só foi testado em Linux.")
+        return False
+
+    try:
+        url_zip = f"https://storage.googleapis.com/chrome-for-testing-public/{versao_completa}/linux64/chromedriver-linux64.zip"
+        caminho_zip = "chromedriver.zip"
+
+        urllib.request.urlretrieve(url_zip, caminho_zip)
+        print("📦 Download do ChromeDriver concluído.")
+
+        with zipfile.ZipFile(caminho_zip, 'r') as zip_ref:
+            zip_ref.extractall("chromedriver_temp")
+
+        # Caminho corrigido da estrutura interna do zip
+        novo_driver = os.path.join("chromedriver_temp", "chromedriver-linux64", "chromedriver")
+
+        if not os.path.exists(novo_driver):
+            raise FileNotFoundError(f"Arquivo não encontrado: {novo_driver}")
+
+        shutil.move(novo_driver, driver_path)
+        os.chmod(driver_path, 0o755)
+
+        os.remove(caminho_zip)
+        shutil.rmtree("chromedriver_temp")
+        print("✅ ChromeDriver atualizado com sucesso.")
+        return True
+
+    except Exception as e:
+        print("❌ Falha ao baixar ou substituir o ChromeDriver:", e)
+        return False
 
 # ==== Configurações iniciais ====
+
+# Atualiza o ChromeDriver antes de iniciar o Selenium
+driver_path = "./chromedriver"
+instalar_chromedriver_compatível(driver_path)
 
 # Carrega variáveis do .env
 load_dotenv()
@@ -30,7 +93,6 @@ chrome_options.add_experimental_option("prefs", {
 })
 
 # Inicializa o navegador
-driver_path = "./chromedriver"
 driver = webdriver.Chrome(service=Service(driver_path), options=chrome_options)
 driver.maximize_window()
 wait = WebDriverWait(driver, 20)
@@ -56,10 +118,8 @@ def aguardar_download(nome_parcial, pasta, timeout=60):
 
 # ==== Ações ====
 
-# Acessa o site de login
 driver.get("https://appv2.creditonamedida.com.br/logar")
 
-# Preenche login
 campo_usuario = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, 'input[placeholder="Digite seu usuário"]')))
 campo_usuario.clear()
 campo_usuario.send_keys(USUARIO)
@@ -68,15 +128,12 @@ campo_senha = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, 'input
 campo_senha.clear()
 campo_senha.send_keys(SENHA)
 
-# Clica no botão "Logar"
 botao_entrar = wait.until(EC.element_to_be_clickable((By.XPATH, '//button[.//span[text()="Logar"]]')))
 botao_entrar.click()
 
-# Aguarda redirecionamento
 wait.until(EC.url_changes("https://appv2.creditonamedida.com.br/logar"))
 print("✅ Login realizado com sucesso.")
 
-# Clica no menu "Relatórios"
 print("➡️ Localizando o botão 'Relatórios'...")
 menu_relatorios = wait.until(EC.element_to_be_clickable((By.XPATH, '//a[contains(text(), "Relatórios")]')))
 menu_relatorios.click()
@@ -84,11 +141,9 @@ time.sleep(1)
 menu_relatorios.click()
 print("✅ Botão 'Relatórios' clicado duas vezes.")
 
-# Aguarda submenu "Extratos"
 print("⏳ Aguardando 5 segundos para o submenu 'Extratos' aparecer...")
 time.sleep(5)
 
-# Clica em "Extratos"
 print("➡️ Tentando localizar e clicar no link 'Extratos'...")
 try:
     link_extratos = wait.until(EC.element_to_be_clickable((By.XPATH, '//a[contains(@href, "/relatorio/extrato")]')))
@@ -97,19 +152,25 @@ try:
 except Exception as e:
     print("❌ Erro ao tentar clicar em 'Extratos':", e)
 
-# Preenche a data inicial
 campo_data_inicial = wait.until(EC.presence_of_element_located((By.NAME, "dataInicial")))
 campo_data_inicial.clear()
 campo_data_inicial.send_keys("01012000")
 print("📅 Data inicial preenchida.")
 
-# Clica em "Pesquisar"
 botao_pesquisar = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, 'button[title="Pesquisar"]')))
 botao_pesquisar.click()
 print("🔍 Botão 'Pesquisar' clicado.")
 time.sleep(5)
 
-# Clica em "Excel"
+# Força a remoção do arquivo antigo, se existir
+relatorio_cnm = os.path.join(diretorio_download, "Relatorio_CNM.xlsx")
+if os.path.exists(relatorio_cnm):
+    try:
+        os.remove(relatorio_cnm)
+        print("🗑️ Arquivo antigo 'Relatorio_CNM.xlsx' removido antes do novo download.")
+    except Exception as e:
+        print(f"⚠️ Não foi possível remover o arquivo antigo: {e}")
+
 print("⏳ Aguardando botão 'Excel' ficar clicável...")
 try:
     botao_excel = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, 'button[title="Excel"]')))
@@ -121,7 +182,6 @@ except Exception as e:
         f.write(driver.page_source)
     print("📄 HTML da página salvo como 'pagina_extrato.html' para análise.")
 
-# Aguarda e renomeia o arquivo
 try:
     arquivo_original = aguardar_download(".xlsx", diretorio_download, timeout=60)
     novo_nome = os.path.join(diretorio_download, "Relatorio_CNM.xlsx")
@@ -130,6 +190,5 @@ try:
 except Exception as e:
     print("❌ Erro ao renomear arquivo:", e)
 
-# Fecha o navegador
 driver.quit()
 print("✅ Processo concluído.")

@@ -1,5 +1,10 @@
 import os
 import time
+import subprocess
+import zipfile
+import urllib.request
+import shutil
+import platform
 from dotenv import load_dotenv, dotenv_values
 from selenium import webdriver
 from selenium.webdriver.common.by import By
@@ -8,7 +13,54 @@ from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 
+# ==== Atualizador automático do ChromeDriver ====
+def instalar_chromedriver_compatível(driver_path="./chromedriver"):
+    print("\U0001f50d Verificando versão do Google Chrome instalada...")
+    try:
+        resultado = subprocess.run(
+            ["/opt/google/chrome/chrome", "--version"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=True
+        )
+        versao_completa = resultado.stdout.strip().split()[-1]
+        print(f"✅ Chrome instalado: versão {versao_completa}")
+    except Exception as e:
+        print("❌ Não foi possível obter a versão do Google Chrome:", e)
+        return False
+
+    print(f"🌐 Buscando ChromeDriver compatível...")
+
+    try:
+        url_zip = f"https://storage.googleapis.com/chrome-for-testing-public/{versao_completa}/linux64/chromedriver-linux64.zip"
+        caminho_zip = "chromedriver.zip"
+
+        urllib.request.urlretrieve(url_zip, caminho_zip)
+        print("📦 Download do ChromeDriver concluído.")
+
+        with zipfile.ZipFile(caminho_zip, 'r') as zip_ref:
+            zip_ref.extractall("chromedriver_temp")
+
+        novo_driver = os.path.join("chromedriver_temp", "chromedriver-linux64", "chromedriver")
+        if not os.path.exists(novo_driver):
+            raise FileNotFoundError(f"Arquivo não encontrado: {novo_driver}")
+
+        shutil.move(novo_driver, driver_path)
+        os.chmod(driver_path, 0o755)
+        os.remove(caminho_zip)
+        shutil.rmtree("chromedriver_temp")
+        print("✅ ChromeDriver atualizado com sucesso.")
+
+        return True
+    except Exception as e:
+        print("❌ Falha ao baixar/substituir ChromeDriver:", e)
+        return False
+
 # ==== Configurações iniciais ====
+
+driver_path = "./chromedriver"
+instalar_chromedriver_compatível(driver_path)
 
 dotenv_path = os.path.join(os.path.dirname(__file__), ".env")
 load_dotenv(dotenv_path)
@@ -24,9 +76,26 @@ if not LOGIN or not SENHA:
     print(f"[DEBUG] SENHA_SOA = {'<vazio>' if not SENHA else '***'}")
     exit(1)
 
-driver_path = "./chromedriver"
+# Pasta de download e limpeza de arquivos antigos
 download_dir = os.path.abspath("download")
-os.makedirs(download_dir, exist_ok=True)
+
+arquivos_csv_anteriores = [
+    "Ativas.csv", "Baixadas.csv", "Determinacao.csv", "Erros.csv", "Pendentes.csv"
+]
+
+if not os.path.exists(download_dir):
+    os.makedirs(download_dir)
+    print(f"📁 Pasta de download criada: {download_dir}")
+else:
+    print(f"📁 Pasta de download já existe: {download_dir}")
+    for nome in arquivos_csv_anteriores:
+        caminho = os.path.join(download_dir, nome)
+        if os.path.exists(caminho):
+            try:
+                os.remove(caminho)
+                print(f"🪚 Arquivo antigo removido: {nome}")
+            except Exception as e:
+                print(f"⚠️ Não foi possível remover {nome}: {e}")
 
 chrome_options = Options()
 chrome_options.add_experimental_option("prefs", {
@@ -87,7 +156,6 @@ def realizar_login():
 def clicar_exportar_csv(botao_id, nome_saida):
     print(f"[INFO] Acessando aba '{botao_id}' com duplo clique...")
     try:
-        # Tratar aba "Erros" sem ID específico
         if botao_id == "href_Erros":
             aba = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, 'a[href="#tab_Erros"]')))
         else:
@@ -102,7 +170,6 @@ def clicar_exportar_csv(botao_id, nome_saida):
 
         print("[INFO] Procurando botão 'Exportar em CSV'...")
 
-        # Mapeamento dos botões de exportação por aba
         if botao_id == "btn_Financeiro":
             botao_exportar = wait.until(EC.element_to_be_clickable((By.ID, "GridNegativacoesBaixadas_csvexport")))
         elif botao_id == "btn_Cobranca":
