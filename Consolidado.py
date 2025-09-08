@@ -460,16 +460,35 @@ def ler_soa() -> pd.DataFrame:
 
 # ===== Consolidação (sem cruzar datas entre fontes) =====
 def _consolidar_row_nocross(row):
+    """
+    NÃO compara datas entre CNM e SOA.
+    Regras:
+      - (NOVA) Se SOA=BAIXADO, CNM=NEGATIVADO e SGP presente -> CONSOLIDADO = NEGATIVADO
+      - Se CNM_Status e SOA_Status coexistirem e CONFLITAREM (Negativado x Baixado) => ERRO
+      - Senão, prioridade: CNM > SOA > SGP (presença = NEGATIVADO)
+      - Se nada: '---'
+    """
     cnm = str(row.get("CNM_Status","")).upper().strip()
     soa = str(row.get("SOA_Status","")).upper().strip()
     sgp = str(row.get("SGP_Status","")).upper().strip()
 
+    # Regra nova: SOA=BAIXADO + CNM=NEGATIVADO + SGP presente => NEGATIVADO
+    if soa == "BAIXADO" and cnm == "NEGATIVADO" and sgp != "":
+        return "NEGATIVADO"
+
+    # Conflito CNM x SOA
     if cnm and soa and {cnm, soa} == {"NEGATIVADO","BAIXADO"}:
         return "ERRO"
-    if cnm: return cnm
-    if soa: return soa
-    if sgp: return "NEGATIVADO"
+
+    # Prioridade padrão
+    if cnm:
+        return cnm
+    if soa:
+        return soa
+    if sgp:
+        return "NEGATIVADO"
     return "---"
+
 
 def unificar_e_validar(df_cnm, df_soa, df_sgp) -> pd.DataFrame:
     base = df_cnm.merge(df_soa, on="Documento", how="outer")
