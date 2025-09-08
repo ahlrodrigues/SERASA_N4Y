@@ -127,7 +127,7 @@ def aguardar_download(pasta, timeout=120):
 
 def realizar_login():
     print("[INFO] Acessando página de login...")
-    driver.get("https://portal.soawebservices.com.br/Negativacoes/VisaoGeral")
+    driver.get("c")
 
     try:
         campo_email = wait.until(EC.visibility_of_element_located((By.ID, "Email")))

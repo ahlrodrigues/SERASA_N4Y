@@ -1,550 +1,316 @@
+# -*- coding: utf-8 -*-
+"""
+Pipeline XLSX-only para unificar CNM + SGP + SOA
+- Mantém CNM em XLSX
+- 'Tipo' sempre 'INCLUSÃO' ou 'EXCLUSÃO' (com acento)
+- Saída final: output/dashboard_unificado.xlsx com colunas:
+  Documento, Nome, SOA_Status, SGP_Status, CNM_Status, Operação, Tipo, Consolidado
+"""
+
+import os, re, glob, shutil, zipfile, platform, subprocess, urllib.request
+from pathlib import Path
 import pandas as pd
-import os
-import html
-import re
 import unicodedata
-from collections import Counter
 
-# === CONFIGURAÇÃO DE CAMINHOS ===
-caminho_dir = './download'
-saida_dir = './output'
-os.makedirs(saida_dir, exist_ok=True)
+# =========================
+# ======== CONFIG =========
+# =========================
+DOWNLOAD_DIR = "./download"
+OUTPUT_DIR   = "./output"
 
-caminho_cnm = os.path.join(caminho_dir, 'Relatorio_CNM.xlsx')
-caminho_sgp = os.path.join(caminho_dir, 'Relatorio_SGP.xlsx')
+CNM_XLSX = os.path.join(DOWNLOAD_DIR, "Relatorio_CNM.xlsx")   # baixado via Selenium
+SGP_XLSX = os.path.join(DOWNLOAD_DIR, "Relatorio_SGP.xlsx")
 
-arquivos_soa = {
-    "Ativas": "Ativas.csv",
-    "Baixadas": "Baixadas.csv",
-    "Pendentes": "Pendentes.csv",
-    "Determinacao": "Determinacao.csv",
-    "Erros": "Erros.csv"
+SOA_CSVS = {
+    "Ativas":       os.path.join(DOWNLOAD_DIR, "Ativas.csv"),
+    "Baixadas":     os.path.join(DOWNLOAD_DIR, "Baixadas.csv"),
+    "Determinacao": os.path.join(DOWNLOAD_DIR, "Determinacao.csv"),
+    "Erros":        os.path.join(DOWNLOAD_DIR, "Erros.csv"),
+    "Pendentes":    os.path.join(DOWNLOAD_DIR, "Pendentes.csv"),
 }
 
-# ==========================
-# Helpers de saída
-# ==========================
-def limpar_output():
-    """Remove todos os arquivos existentes na pasta de saída antes de gerar novos."""
-    if not os.path.isdir(saida_dir):
-        return
-    for nome in os.listdir(saida_dir):
-        caminho = os.path.join(saida_dir, nome)
-        try:
-            if os.path.isfile(caminho):
-                os.remove(caminho)
-        except Exception:
-            pass
+OUT_XLSX  = os.path.join(OUTPUT_DIR, "dashboard_unificado.xlsx")
 
-# ==========================
-# Helpers de colunas/cabeçalho/normalização
-# ==========================
-def deduplicar_colunas(cols):
-    counter = Counter()
-    novas = []
-    for col in cols:
-        counter[col] += 1
-        novas.append(col if counter[col] == 1 else f"{col}.{counter[col]-1}")
-    return novas
+# =========================
+# ======= UTILS ===========
+# =========================
+def info(m): print(f"[INFO] {m}")
+def warn(m): print(f"[WARN] {m}")
 
-def _norm(s: str) -> str:
-    if s is None:
-        return ""
+def _norm_text(s):
+    if pd.isna(s): return ""
     s = str(s).strip()
-    s = unicodedata.normalize("NFKD", s)
-    s = "".join(ch for ch in s if not unicodedata.combining(ch))
-    s = re.sub(r"[\s_/|-]+", " ", s)
-    s = re.sub(r"[^0-9A-Za-z ]", "", s)
-    return s.upper().strip()
+    s = unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode("ascii")
+    return s
 
-def _upper_no_accents(s: str) -> str:
-    if s is None:
-        return ""
-    s = unicodedata.normalize("NFKD", str(s).strip())
-    s = "".join(ch for ch in s if not unicodedata.combining(ch))
-    return s.upper().strip()
+def _norm_cols(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    df.columns = [_norm_text(c).lower().replace(" ", "_") for c in df.columns]
+    return df
 
-def encontrar_coluna(df, candidatos):
-    """Localiza primeira coluna cujo nome (normalizado) casa exatamente ou contém o candidato normalizado."""
-    mapa_norm = {col: _norm(col) for col in df.columns}
-    for cand in candidatos:
-        cand_norm = _norm(cand)
-        # match exato
-        for col, normv in mapa_norm.items():
-            if normv == cand_norm:
-                return col
-        # match por inclusão
-        for col, normv in mapa_norm.items():
-            if cand_norm in normv:
-                return col
-    return None
+def _as_digits(s): return re.sub(r"\D", "", str(s) if s is not None else "")
 
-def renomear_colunas_para_padrao(df, origem="CNM"):
-    """
-    Padroniza nomes-chave:
-      - 'CPF/CNPJ'
-      - (CNM) 'Tipo', 'Data / Hora' (somente rótulos de operação), 'Nome'
-    """
-    mapeamento_comum = {
-        "CPF/CNPJ": [
-            "CPF/CNPJ", "CPF - CNPJ", "CPF CNPJ", "Documento", "DOC", "CPF", "CNPJ", "Documento (CPF)"
-        ]
-    }
-    mapeamento_cnm_extra = {
-        "Tipo": [
-            "Tipo", "Tipo Operacao", "Tipo Operação", "Operacao", "Operação", "Evento", "Movimento", "Tipo Movimento"
-        ],
-        # ⚠️ Evita 'Data' genérica; usa apenas rótulos ligados à operação
-        "Data / Hora": [
-            "Data / Hora", "Data Hora", "Data Operacao", "Data Operação",
-            "Data Inclusao", "Data Inclusão", "Data Exclusao", "Data Exclusão"
-        ],
-        "Nome": [
-            "Nome", "Devedor", "Razao Social", "Razão Social", "Cliente", "Pessoa", "Nome/Razão Social", "Nome Razao Social"
-        ]
-    }
-
-    ren = {}
-    for alvo, cand in mapeamento_comum.items():
-        col = encontrar_coluna(df, cand)
-        if col: ren[col] = alvo
-
-    if origem.upper() == "CNM":
-        for alvo, cand in mapeamento_cnm_extra.items():
-            col = encontrar_coluna(df, cand)
-            if col: ren[col] = alvo
-
-    return df.rename(columns=ren) if ren else df
-
-# ==========================
-# Leitura inteligente de Excel (detecta header real)
-# ==========================
-def _escolher_melhor_aba(xl_dict):
-    melhor_nome, melhor_score = None, -1
-    for nome, df in xl_dict.items():
-        score = df.notna().sum().sum()
-        if score > melhor_score:
-            melhor_nome, melhor_score = nome, score
-    return melhor_nome
-
-def _detectar_linha_cabecalho(df, candidatos_header=None, max_scan=30):
-    if candidatos_header is None:
-        candidatos_header = ["CPF/CNPJ", "CPF - CNPJ", "CPF", "CNPJ", "Documento", "Tipo", "Data / Hora", "Nome", "Devedor"]
-    cand_norm = [_norm(c) for c in candidatos_header]
-    n_scan = min(len(df), max_scan)
-    for i in range(n_scan):
-        linha = df.iloc[i].astype(str).fillna("").tolist()
-        linha_norm = [_norm(x) for x in linha]
-        hits = sum(1 for val in linha_norm if any(c in val for c in cand_norm))
-        if hits >= 2:
+def _detect_header_row(df_raw: pd.DataFrame, max_scan=30):
+    patterns = ["documento","cpf","cnpj","cpf_cnpj","nome","razao","fantasia"]
+    for i in range(min(max_scan, len(df_raw))):
+        row = df_raw.iloc[i].astype(str).str.lower().fillna("")
+        if any(p in " ".join(row.tolist()) for p in patterns):
             return i
     return 0
 
-def ler_excel_com_header_real(caminho, origem="CNM", skiprows_sugerido=None):
-    xls = pd.read_excel(caminho, sheet_name=None, header=None, dtype=str, engine='openpyxl')
-    aba = _escolher_melhor_aba(xls)
-    df = xls[aba].copy()
+def ensure_output_dir_clean():
+    Path(OUTPUT_DIR).mkdir(parents=True, exist_ok=True)
+    for p in Path(OUTPUT_DIR).glob("*"):
+        if p.is_file(): p.unlink()
+        elif p.is_dir(): shutil.rmtree(p)
 
-    if skiprows_sugerido:
-        df = df.iloc[skiprows_sugerido:].reset_index(drop=True)
+# =========================
+# ======= MAPEAMENTOS =====
+# =========================
+def cnm_tipo_para_status(tipo_raw: str) -> str:
+    t = _norm_text(tipo_raw).upper()
+    if t == "INCLUSAO":   return "NEGATIVADO"
+    if t == "EXCLUSAO":   return "BAIXADO"
+    if t == "PROCESSANDO": return ""  # ignorado na consolidação
+    return "ERRO" if t else ""
 
-    header_idx = _detectar_linha_cabecalho(df)
-    header = df.iloc[header_idx].astype(str).fillna("").tolist()
-    header = [h if not re.match(r"^Unnamed", str(h), re.I) else "" for h in header]
-    header = [h.strip() for h in header]
+def cnm_tipo_acento(tipo_raw: str) -> str:
+    """Retorna 'INCLUSÃO' ou 'EXCLUSÃO' (com acento); caso contrário, '---'."""
+    t = _norm_text(tipo_raw).upper()
+    if t == "INCLUSAO": return "INCLUSÃO"
+    if t == "EXCLUSAO": return "EXCLUSÃO"
+    return "---"
 
-    if not any(h for h in header) and header_idx + 1 < len(df):
-        header_idx += 1
-        header = df.iloc[header_idx].astype(str).fillna("").tolist()
-        header = [h if not re.match(r"^Unnamed", str(h), re.I) else "" for h in header]
-        header = [h.strip() for h in header]
+# =========================
+# ========= CNM ===========
+# =========================
+def ler_cnm_xlsx(path_xlsx: str) -> pd.DataFrame:
+    if not os.path.exists(path_xlsx):
+        raise FileNotFoundError(f"CNM não encontrado: {path_xlsx}")
 
-    header = [h if h else f"COL_{i}" for i, h in enumerate(header)]
-    if len(set(header)) < len(header):
-        header = deduplicar_colunas(header)
+    df_raw = pd.read_excel(path_xlsx, header=None)
+    header_row = _detect_header_row(df_raw, max_scan=40)
+    df_raw.columns = df_raw.iloc[header_row].astype(str).tolist()
+    df_raw = df_raw.iloc[header_row+1:].reset_index(drop=True)
+    df = _norm_cols(df_raw)
 
-    df = df.iloc[header_idx + 1:].reset_index(drop=True)
-    df.columns = header
-    df = df.dropna(axis=1, how='all').dropna(axis=0, how='all')
-    df = df.loc[:, ~df.columns.str.match(r"^Unnamed", na=False)]
-
-    return renomear_colunas_para_padrao(df, origem=origem)
-
-# ==========================
-# Documento & Data
-# ==========================
-def padronizar_cpf_cnpj(coluna):
-    """Normaliza CPF (11) e CNPJ (14)."""
-    def _n(v):
-        d = re.sub(r'\D', '', str(v))
-        if len(d) <= 11:
-            return d[-11:].zfill(11)
-        else:
-            return d[-14:].zfill(14)
-    return coluna.astype(str).map(_n)
-
-def to_datetime_robusta(series):
-    a = pd.to_datetime(series, errors='coerce', dayfirst=True)
-    b = pd.to_datetime(series, errors='coerce', dayfirst=False)
-    return a.fillna(b)
-
-def parse_data_hora(valor):
-    s = str(valor).strip()
-    if not s or s in {"NaT", "nan"}:
-        return "-"
-    try:
-        if re.match(r"^\d{4}-\d{2}-\d{2}", s):
-            dt = pd.to_datetime(s, dayfirst=False, errors='coerce')
-        else:
-            dt = pd.to_datetime(s, dayfirst=True, errors='coerce')
-        return s if pd.isna(dt) else dt.strftime('%d/%m/%Y %H:%M')
-    except Exception:
-        return s
-
-# ==========================
-# SOA
-# ==========================
-def ler_e_normalizar_soa(nome, caminho_arquivo):
-    print(f"[INFO] Lendo arquivo SOA: {nome} -> {caminho_arquivo}")
-    # Sniff automático de separador (',' ou ';')
-    df = pd.read_csv(caminho_arquivo, encoding="utf-8", dtype=str, sep=None, engine='python')
-    raw_cols = list(df.columns)
-    cols = [html.unescape(col).replace('+ACI-', '').replace('+AC0-', '-').replace('"', '').strip() for col in raw_cols]
-    if len(set(cols)) < len(cols):
-        print(f"[AVISO] Colunas duplicadas detectadas em {nome}. Renomeando...")
-        cols = deduplicar_colunas(cols)
-    df.columns = cols
-
-    df = df.rename(columns={
-        'Documento': 'documento',
-        'Devedor': 'devedor',
-        'Unique ID': 'Unique ID',
-        'Data Inclusão': 'data',
-        'Data Inclusao': 'data',
-        'Data Exclusão': 'data',
-        'Data Exclusao': 'data'
-    })
-    df = df.loc[:, ~df.columns.duplicated()]
-
-    possivel_doc = 'documento' if 'documento' in df.columns else encontrar_coluna(df, ["Documento", "CPF/CNPJ", "CPF - CNPJ", "CPF", "CNPJ"])
-    if possivel_doc:
-        df['CPF/CNPJ'] = padronizar_cpf_cnpj(df[possivel_doc])
-    else:
-        df['CPF/CNPJ'] = ""
-
-    df['fonte'] = nome
-    return df
-
-# ==========================
-# Carga de dados
-# ==========================
-def carregar_dados():
-    if not os.path.exists(caminho_cnm) or not os.path.exists(caminho_sgp):
-        print('[ERRO] Arquivo CNM ou SGP não encontrado.')
-        exit(1)
-
-    print('[INFO] Lendo arquivos CNM e SGP...')
-    cnm_df = ler_excel_com_header_real(caminho_cnm, origem="CNM")
-
-    try:
-        sgp_df = ler_excel_com_header_real(caminho_sgp, origem="SGP", skiprows_sugerido=8)
-    except Exception:
-        sgp_df = ler_excel_com_header_real(caminho_sgp, origem="SGP", skiprows_sugerido=None)
-
-    if 'CPF/CNPJ' not in cnm_df.columns:
-        raise KeyError(f"[CNM] Coluna 'CPF/CNPJ' não encontrada. Colunas: {list(cnm_df.columns)}")
-    if 'CPF/CNPJ' not in sgp_df.columns:
-        raise KeyError(f"[SGP] Coluna 'CPF/CNPJ' não encontrada. Colunas: {list(sgp_df.columns)}")
-
-    cnm_df['CPF/CNPJ'] = padronizar_cpf_cnpj(cnm_df['CPF/CNPJ'])
-    sgp_df['CPF/CNPJ'] = padronizar_cpf_cnpj(sgp_df['CPF/CNPJ'])
-
-    if 'Tipo' not in cnm_df.columns:
-        cnm_df['Tipo'] = "ERRO"
-
-    # Data de operação apenas por rótulos claros
-    if 'Data / Hora' in cnm_df.columns:
-        cnm_df['_dt'] = to_datetime_robusta(cnm_df['Data / Hora'])
-    else:
-        cnm_df['_dt'] = pd.NaT
-
-    # SOA
-    lista_soa = []
-    for nome, arquivo in arquivos_soa.items():
-        caminho = os.path.join(caminho_dir, arquivo)
-        if os.path.exists(caminho):
-            lista_soa.append(ler_e_normalizar_soa(nome, caminho))
-        else:
-            print(f"[AVISO] Arquivo {arquivo} não encontrado.")
-    if lista_soa:
-        soa_df = pd.concat(lista_soa, ignore_index=True)
-        for col in ["CPF/CNPJ", "devedor", "data", "fonte", "Unique ID"]:
-            if col not in soa_df.columns:
-                soa_df[col] = "-"
-    else:
-        soa_df = pd.DataFrame(columns=["CPF/CNPJ", "devedor", "data", "fonte", "Unique ID"])
-
-    return cnm_df, sgp_df, soa_df
-
-# ==========================
-# Determinar evento do CNM (mais recente) por CPF/CNPJ IGNORANDO PF/PJ
-# ==========================
-def _classificar_evento(valor_tipo: str):
-    """
-    Classifica INCLUSAO / EXCLUSAO por substring em valor normalizado (sem acento).
-    Retorna "INCLUSAO", "EXCLUSAO" ou None.
-    """
-    t = _upper_no_accents(valor_tipo)
-    if not t:
-        return None
-    if "EXCLUSAO" in t:
-        return "EXCLUSAO"
-    if "INCLUSAO" in t:
-        return "INCLUSAO"
-    return None  # PF/PJ/consultas e demais
-
-def obter_tipo_cnm_mais_recente(rows_cnm: pd.DataFrame):
-    """
-    Considera apenas INCLUSAO/EXCLUSAO (por substring), ignorando PF/PJ.
-    - Se houver datas válidas (_dt) → pega a mais RECENTE entre os relevantes.
-    - Sem datas → prioridade EXCLUSAO > INCLUSAO; senão "-"
-    """
-    if rows_cnm.empty or 'Tipo' not in rows_cnm.columns:
-        return "-"
-
-    classificados = rows_cnm.assign(_ev=rows_cnm['Tipo'].map(_classificar_evento))
-    relevantes = classificados[~classificados['_ev'].isna()].copy()
-    if relevantes.empty:
-        return "-"
-
-    if '_dt' in relevantes.columns and relevantes['_dt'].notna().any():
-        idx = relevantes['_dt'].idxmax()
-        return relevantes.loc[idx, '_ev']
-
-    # Sem data: prioridade EXCLUSAO > INCLUSAO
-    if (relevantes['_ev'] == "EXCLUSAO").any():
-        return "EXCLUSAO"
-    if (relevantes['_ev'] == "INCLUSAO").any():
-        return "INCLUSAO"
-    return "-"
-
-def obter_data_cnm_mais_recente(rows_cnm: pd.DataFrame):
-    if rows_cnm.empty:
-        return "-"
-    if '_dt' in rows_cnm.columns and rows_cnm['_dt'].notna().any():
-        dt = rows_cnm.loc[rows_cnm['_dt'].idxmax(), '_dt']
-        try:
-            return dt.strftime('%d/%m/%Y %H:%M')
-        except Exception:
-            pass
-    if 'Data / Hora' in rows_cnm.columns:
-        for v in rows_cnm['Data / Hora']:
-            s = parse_data_hora(v)
-            if s != "-":
-                return s
-    return "-"
-
-# ==========================
-# Regras finais de TIPO + STATUS (único ponto que escreve esses campos)
-# ==========================
-def definir_tipo_status(tipo_cnm_final, doc, documentos_sgp, fontes_soa, tem_cnm):
-    """
-    Regras:
-    - Se TEM CNM:
-        - Se DOC está no SGP:
-            - CNM = EXCLUSAO  -> TIPO = Baixada,   STATUS = ERRO
-            - Caso contrário  -> TIPO = NEGATIVADO, STATUS = NEGATIVADO
-              (inclui CNM=INCLUSAO ou CNM não classificável/indefinido)
-        - Se DOC NÃO está no SGP:
-            - CNM = EXCLUSAO  -> TIPO = Baixada,   STATUS = BAIXADO
-            - CNM = INCLUSAO  -> TIPO = NEGATIVADO, STATUS = ERRO
-            - Caso contrário  -> TIPO = ERRO,      STATUS = ERRO
-    - Se NÃO TEM CNM (fallback via SOA):
-        - ATIVAS        -> NEGATIVADO / NEGATIVADO
-        - BAIXADAS      -> Baixada   / BAIXADO
-        - DETERMINACAO  -> Determinação / ERRO
-        - ERROS/PENDENTES -> ERRO / ERRO
-        - Sem SOA → ERRO / ERRO
-    """
-    if tem_cnm:
-        if doc in documentos_sgp:
-            if tipo_cnm_final == "EXCLUSAO":
-                return ("Baixada", "ERRO")
-            return ("NEGATIVADO", "NEGATIVADO")
-        else:
-            if tipo_cnm_final == "EXCLUSAO":
-                return ("Baixada", "BAIXADO")
-            if tipo_cnm_final == "INCLUSAO":
-                return ("NEGATIVADO", "ERRO")
-            return ("ERRO", "ERRO")
-    else:
-        fontes_upper = {_upper_no_accents(f) for f in (fontes_soa or [])}
-        if "ATIVAS" in fontes_upper:
-            return ("NEGATIVADO", "NEGATIVADO")
-        if "BAIXADAS" in fontes_upper:
-            return ("Baixada", "BAIXADO")
-        if "DETERMINACAO" in fontes_upper:
-            return ("Determinação", "ERRO")
-        if "ERROS" in fontes_upper or "PENDENTES" in fontes_upper:
-            return ("ERRO", "ERRO")
-        return ("ERRO", "ERRO")
-
-
-# ==========================
-# Geração principal (único lugar que define e escreve TIPO/STATUS)
-# ==========================
-def gerar_dashboard():
-    # 1) Limpa a pasta de saída
-    limpar_output()
-
-    # 2) Carrega bases
-    cnm_df, sgp_df, soa_df = carregar_dados()
-
-    documentos = set(cnm_df['CPF/CNPJ']) | set(soa_df['CPF/CNPJ']) | set(sgp_df['CPF/CNPJ'])
-    documentos_sgp = set(sgp_df['CPF/CNPJ'])
-
-    dados = []
-    for doc in documentos:
-        row_cnm = cnm_df[cnm_df['CPF/CNPJ'] == doc]
-        row_sgp = sgp_df[sgp_df['CPF/CNPJ'] == doc]
-        row_soa = soa_df[soa_df['CPF/CNPJ'] == doc]
-
-        tem_cnm = not row_cnm.empty
-        fontes = list(row_soa['fonte'].unique()) if not row_soa.empty else []
-
-        # Evento CNM/Data MAIS RECENTES (ignorando PF/PJ e aceitando substrings)
-        if tem_cnm:
-            tipo_cnm_final = obter_tipo_cnm_mais_recente(row_cnm)
-            data = obter_data_cnm_mais_recente(row_cnm)
-        elif not row_soa.empty:
-            tipo_cnm_final = "-"
-            data = str(row_soa['data'].values[0]) if 'data' in row_soa.columns else "-"
-        else:
-            tipo_cnm_final = "-"
-            data = "-"
-
-        # === *** ÚNICO ponto que escreve TIPO e STATUS *** ===
-        tipo_norm, status = definir_tipo_status(tipo_cnm_final, doc, documentos_sgp, fontes, tem_cnm)
-
-        # Nome / ID
-        nome = row_soa['devedor'].values[0] if not row_soa.empty else (row_cnm['Nome'].values[0] if ('Nome' in row_cnm.columns and tem_cnm and not row_cnm['Nome'].isna().all()) else "-")
-        id_val = row_soa['Unique ID'].values[0] if ('Unique ID' in row_soa.columns and not row_soa['Unique ID'].isnull().all() and not row_soa.empty) else "-"
-
-        # Local (verde/vermelho)
-        locais = []
-        for origem, df_rows in [('CNM', row_cnm), ('SOA', row_soa), ('SGP', row_sgp)]:
-            color = "green" if not df_rows.empty else "red"
-            locais.append(f"<span style='color:{color}'>{origem}</span>")
-        local = " | ".join(locais)
-
-
-        dados.append({
-            "ID": str(id_val),
-            "CPF/CNPJ": str(doc),
-            "Nome": nome,
-            "Data": data,
-            "Tipo": tipo_norm,   # ← gravando TIPO final aqui
-            "Local": local,
-            "Status": status     # ← gravando STATUS final aqui
-        })
-
-    df = pd.DataFrame(dados)
-    df["CPF/CNPJ"] = df["CPF/CNPJ"].astype(str)
-    df["ID"] = df["ID"].astype(str)
-
-    # Exporta Excel
-    df.to_excel(os.path.join(saida_dir, "resultado_unificado.xlsx"), index=False)
-    print("[SUCESSO] resultado_unificado.xlsx gerado com sucesso!")
-
-    gerar_html(df)
-
-# ==========================
-# HTML
-# ==========================
-def gerar_html(df):
-    html_tabela = df.to_html(index=False, escape=False, table_id='tabela', classes='display')
-    subtitulos = {
-        "NEGATIVADO": "Clientes negativados no CNM ou SOA e presentes no SGP.",
-        "BAIXADO": "Clientes excluídos no CNM ou no SOA e ausentes no SGP.",
-        "ERRO": "Clientes com inconsistência entre CNM, SOA e SGP.",
-        "SCORE": "Consultas de SCORE identificadas como PF ou PJ."
+    aliases = {
+        "documento": ["documento","cpf_cnpj","cpfcnpj","cpf","cnpj","doc","unnamed:_3","unnamed:_2"],
+        "nome":      ["nome","nome_razao_social","razao_social","nome_fantasia","cliente","pessoa"],
+        "operacao":  ["operacao","operacao_","tipo_operacao"],
+        "tipo":      ["tipo","tipo_","status","situacao"]
     }
-    html_code = f"""<!DOCTYPE html>
-<html lang='pt-BR'>
-<head>
-    <meta charset='UTF-8'><title>Dashboard Unificado</title>
-    <link rel='stylesheet' href='https://cdn.datatables.net/1.13.4/css/jquery.dataTables.min.css'>
-    <script src='https://code.jquery.com/jquery-3.7.0.min.js'></script>
-    <script src='https://cdn.datatables.net/1.13.4/js/jquery.dataTables.min.js'></script>
-    <style>
-        body {{ font-family: Arial, sans-serif; text-align: center; }}
-        table {{ margin: 0 auto; width: 90%; }}
-        .subtitulo {{ margin: 10px 0; font-weight: bold; }}
-        th {{ white-space: nowrap; }}
-    </style>
-</head>
-<body>
-    <h2>Dashboard Unificado - CNM + SOA x SGP</h2>
-    <div class='subtitulo' id='subtitulo'></div>
-    {html_tabela}
-    <footer>VERDE = Presente | VERMELHO = Ausente</footer>
-    <script>
-        const subtitulos = {{
-            "NEGATIVADO": "{subtitulos['NEGATIVADO']}",
-            "BAIXADO": "{subtitulos['BAIXADO']}",
-            "ERRO": "{subtitulos['ERRO']}",
-            "SCORE": "{subtitulos['SCORE']}"
-        }};
-        $(document).ready(function() {{
-            const table = $('#tabela').DataTable({{
-                paging: true,
-                searching: true,
-                ordering: true,
-                pageLength: 25,
-                language: {{
-                    url: '//cdn.datatables.net/plug-ins/1.13.4/i18n/pt-BR.json'
-                }},
-                initComplete: function () {{
-                    // 0=ID, 1=CPF/CNPJ, 2=Nome, 3=Data, 4=Tipo, 5=Local, 6=Status
-                    const colunasParaFiltrar = {{
-                        3: "Data",
-                        4: "Tipo",
-                        5: "Local",
-                        6: "Status"
-                    }};
-                    this.api().columns().every(function (index) {{
-                        if (colunasParaFiltrar[index]) {{
-                            const column = this;
-                            const label = colunasParaFiltrar[index];
-                            const select = $('<select><option value="">Filtrar por ' + label + '</option></select>')
-                                .appendTo($(column.header()).empty())
-                                .on('change', function () {{
-                                    const val = $.fn.dataTable.util.escapeRegex($(this).val());
-                                    column.search(val ? '^' + val + '$' : '', true, false).draw();
-                                }});
-                            column.data().unique().sort().each(function (d) {{
-                                if (d) select.append('<option value="' + d + '">' + d + '</option>');
-                            }});
-                        }}
-                    }});
-                }}
-            }});
-            table.on('draw search.dt', function () {{
-                const statusColData = table.column(6, {{search: 'applied'}}).data().toArray();
-                const unicos = [...new Set(statusColData.filter(Boolean))];
-                const msg = unicos.length === 1 ? subtitulos[unicos[0]] || '' : '';
-                $('#subtitulo').html(msg);
-            }});
-        }});
-    </script>
-</body>
-</html>"""
-    with open(os.path.join(saida_dir, "dashboard_unificado.html"), "w", encoding="utf-8") as f:
-        f.write(html_code)
-    print("[SUCESSO] dashboard_unificado.html gerado com sucesso!")
 
-# ==========================
-# Main
-# ==========================
-if __name__ == '__main__':
-    gerar_dashboard()
+    def pick(keys):
+        for k in keys:
+            if k in df.columns: return k
+        return None
+
+    col_doc  = pick(aliases["documento"])
+    col_nome = pick(aliases["nome"])  or "nome"
+    col_op   = pick(aliases["operacao"]) or "operacao"
+    col_tipo = pick(aliases["tipo"]) or "tipo"
+
+    # Heurística p/ Documento se não achar
+    if col_doc is None:
+        best_col, best_ratio = None, -1
+        for c in df.columns:
+            series = df[c].astype(str).fillna("")
+            digits = series.map(_as_digits)
+            long_num = digits.map(lambda x: len(x) >= 9)
+            ratio = long_num.mean()
+            if ratio > best_ratio: best_ratio, best_col = ratio, c
+        col_doc = best_col
+        info(f"[CNM] Coluna 'documento' detectada: {col_doc} (ratio={best_ratio:.2f})")
+
+    out = pd.DataFrame({
+        "Documento": df[col_doc].astype(str).map(_as_digits),        # sem zfill para aceitar CNPJ
+        "Nome":      df[col_nome].astype(str).str.strip(),
+        "Operação":  df[col_op].astype(str).str.strip() if col_op in df.columns else "",
+        "Tipo":      df[col_tipo].apply(cnm_tipo_acento)              # INCLUSÃO / EXCLUSÃO / ---
+    })
+    out["CNM_Status"] = df[col_tipo].apply(cnm_tipo_para_status)
+    return out
+
+# =========================
+# ========= SGP ===========
+# =========================
+def ler_sgp_xlsx(path_xlsx: str) -> pd.DataFrame:
+    if not os.path.exists(path_xlsx):
+        warn(f"SGP não encontrado: {path_xlsx}. Voltando vazio.")
+        return pd.DataFrame(columns=["Documento","SGP_Status"])
+
+    df = pd.read_excel(path_xlsx)
+    df = _norm_cols(df)
+
+    # Documento
+    doc_col = None
+    for c in ["cpf_cnpj","cpfcnpj","cpf","cnpj","documento","doc"]:
+        if c in df.columns: doc_col = c; break
+    if doc_col is None:
+        best_col, best_ratio = None, -1
+        for c in df.columns:
+            series = df[c].astype(str).fillna("")
+            digits = series.map(_as_digits)
+            long_num = digits.map(lambda x: len(x) >= 9)
+            ratio = long_num.mean()
+            if ratio > best_ratio: best_ratio, best_col = ratio, c
+        doc_col = best_col
+        info(f"[SGP] Coluna doc detectada: {doc_col} (ratio={best_ratio:.2f})")
+
+    # Status
+    status_col = None
+    for c in ["status","situacao","tipo","resultado"]:
+        if c in df.columns: status_col = c; break
+
+    out = pd.DataFrame({"Documento": df[doc_col].astype(str).map(_as_digits)})
+    if status_col:
+        s = df[status_col].astype(str).str.upper().str.strip()
+        s = s.replace({"INCLUSAO":"NEGATIVADO","EXCLUSAO":"BAIXADO"})
+        out["SGP_Status"] = s.where(s.isin(["NEGATIVADO","BAIXADO"]), "ERRO")
+    else:
+        out["SGP_Status"] = ""
+    # 1 linha por documento (pega primeiro válido)
+    out = out.groupby("Documento", as_index=False)["SGP_Status"].agg(lambda x: next((v for v in x if v), ""))
+    return out
+
+# =========================
+# ========= SOA ===========
+# =========================
+def ler_soa_csvs(csvs: dict) -> pd.DataFrame:
+    frames = []
+    for aba, path in csvs.items():
+        if not os.path.exists(path): continue
+        try:
+            df = pd.read_csv(path, dtype=str, engine="python")
+        except Exception:
+            df = pd.read_csv(path, dtype=str, engine="python", sep=";")
+        df = _norm_cols(df)
+
+        # Documento
+        doc_col = None
+        for c in ["documento","cpf_cnpj","cpfcnpj","cpf","cnpj","doc"]:
+            if c in df.columns: doc_col = c; break
+        if doc_col is None:
+            best_col, best_ratio = None, -1
+            for c in df.columns:
+                series = df[c].astype(str).fillna("")
+                digits = series.map(_as_digits)
+                long_num = digits.map(lambda x: len(x) >= 9)
+                ratio = long_num.mean()
+                if ratio > best_ratio: best_ratio, best_col = ratio, c
+            doc_col = best_col
+            info(f"[SOA/{aba}] Coluna doc detectada: {doc_col} (ratio={best_ratio:.2f})")
+
+        tmp = pd.DataFrame({"Documento": df[doc_col].astype(str).map(_as_digits)})
+        aba_l = aba.lower()
+        if aba_l == "ativas":
+            tmp["SOA_Status"] = "NEGATIVADO"; tmp["SOA_Origem"] = "Ativas"
+        elif aba_l == "baixadas":
+            tmp["SOA_Status"] = "BAIXADO";    tmp["SOA_Origem"] = "Baixadas"
+        elif aba_l in ("determinacao","determinação"):
+            tmp["SOA_Status"] = "ERRO";       tmp["SOA_Origem"] = "Determinacao"
+        elif aba_l == "erros":
+            tmp["SOA_Status"] = "ERRO";       tmp["SOA_Origem"] = "Erros"
+        elif aba_l == "pendentes":
+            tmp["SOA_Status"] = "";           tmp["SOA_Origem"] = "Pendentes"
+        else:
+            tmp["SOA_Status"] = "";           tmp["SOA_Origem"] = aba
+        frames.append(tmp)
+
+    if not frames:
+        warn("Sem CSVs do SOA. Voltando vazio.")
+        return pd.DataFrame(columns=["Documento","SOA_Status","SOA_Origem"])
+
+    df_soa = pd.concat(frames, ignore_index=True)
+    def pick_status(vals):
+        vals = list(pd.Series(vals).dropna().astype(str))
+        for pref in ["NEGATIVADO","BAIXADO","ERRO"]:
+            if pref in vals: return pref
+        return ""
+    out = df_soa.groupby("Documento", as_index=False).agg({
+        "SOA_Status": pick_status,
+        "SOA_Origem": lambda x: next((v for v in x if v), "---")
+    })
+    return out
+
+# =========================
+# ===== CONSOLIDAÇÃO ======
+# =========================
+def consolidar_row(row):
+    cnm_status = str(row.get("CNM_Status","")).upper().strip()
+    soa_status = str(row.get("SOA_Status","")).upper().strip()
+    sgp_status = str(row.get("SGP_Status","")).upper().strip()
+
+    cnm_origem = str(row.get("CNM_Origem","")).strip() or "---"
+    soa_origem = str(row.get("SOA_Origem","")).strip() or "---"
+
+    # Regra especial solicitada
+    if sgp_status == "NEGATIVADO" and cnm_origem == "---" and soa_origem == "---":
+        return "ERRO"
+
+    statuses = {cnm_status, soa_status, sgp_status} - {""}
+    if not statuses: return "---"
+    if "ERRO" in statuses: return "ERRO"
+    if {"NEGATIVADO","BAIXADO"}.issubset(statuses): return "ERRO"
+    if len(statuses) == 1: return list(statuses)[0]
+    return "ERRO"
+
+def unificar_cnm_soa_sgp(df_cnm, df_soa, df_sgp):
+    base = df_cnm.merge(df_soa, on="Documento", how="outer")
+    base = base.merge(df_sgp, on="Documento", how="outer")
+
+    # Origens para a regra especial
+    base["CNM_Origem"] = base["Operação"].where(base["Operação"].notna(), "---").fillna("---")
+    base["SOA_Origem"] = base.get("SOA_Origem","---")
+    base["SOA_Origem"] = base["SOA_Origem"].fillna("---")
+
+    # Consolidado
+    base["Consolidado"] = base.apply(consolidar_row, axis=1)
+
+    # Remover PROCESSANDO do CNM (CNM_Status vazio) se nenhuma outra origem trouxe status
+    mask_keep = (base["CNM_Status"].fillna("")!="") | (base["SOA_Status"].fillna("")!="") | (base["SGP_Status"].fillna("")!="")
+    base = base[mask_keep].copy()
+
+    # Colunas finais na ordem pedida
+    finais = ["Documento","Nome","SOA_Status","SGP_Status","CNM_Status","Operação","Tipo","Consolidado"]
+    # Preenche ausentes
+    for c in finais:
+        if c not in base.columns: base[c] = "---"
+        base[c] = base[c].fillna("---").replace("", "---")
+
+    return base[finais].sort_values(by=["Documento","Nome"]).reset_index(drop=True)
+
+# =========================
+# ========= MAIN ==========
+# =========================
+def gerar_xlsx_unificado():
+    info("Lendo CNM (XLSX) preservando Operação e criando Tipo (INCLUSÃO/EXCLUSÃO)...")
+    df_cnm = ler_cnm_xlsx(CNM_XLSX)
+
+    info("Lendo SGP (XLSX)...")
+    df_sgp = ler_sgp_xlsx(SGP_XLSX)
+
+    info("Lendo SOA (CSVs)...")
+    df_soa = ler_soa_csvs(SOA_CSVS)
+
+    info("Construindo unificado...")
+    df_final = unificar_cnm_soa_sgp(df_cnm, df_soa, df_sgp)
+
+    ensure_output_dir_clean()
+    info(f"Gravando XLSX final com {len(df_final)} linhas em: {OUT_XLSX}")
+    with pd.ExcelWriter(OUT_XLSX, engine="xlsxwriter") as writer:
+        df_final.to_excel(writer, index=False, sheet_name="Dashboard")
+        # Larguras básicas
+        ws = writer.sheets["Dashboard"]
+        widths = {
+            "Documento":18, "Nome":36, "SOA_Status":14, "SGP_Status":14, "CNM_Status":14,
+            "Operação":18, "Tipo":12, "Consolidado":14
+        }
+        for idx, col in enumerate(df_final.columns, start=0):
+            ws.set_column(idx, idx, widths.get(col, 16))
+
+    info("Concluído.")
+
+if __name__ == "__main__":
+    gerar_xlsx_unificado()
