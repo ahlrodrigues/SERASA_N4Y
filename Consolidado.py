@@ -346,7 +346,7 @@ def ler_soa() -> pd.DataFrame:
       - Determinacao -> "Determinação"
     Se houver Ativas e Baixadas, decide pela MAIOR DATA entre elas (SOA apenas).
     Caso não haja Ativas/Baixadas, prioriza: Pendente > erro > Determinação.
-    Também captura nome se existir nas planilhas do SOA e devolve como Nome_SOA (para fallback).
+    Também captura nome, se existir, e retorna em Nome_SOA.
     """
     frames = []
     cat_map = {
@@ -361,23 +361,31 @@ def ler_soa() -> pd.DataFrame:
         if not path.exists():
             continue
         try:
+            # tenta CSV padrão; se vier tudo numa coluna, tenta ';'
             df = pd.read_csv(path, dtype=str, engine="python")
             if df.shape[1] == 1:
                 df = pd.read_csv(path, dtype=str, engine="python", sep=";")
         except Exception:
-            df = pd.read_csv(path, dtype=str, engine="python", sep=";")
+            # fallback de separador/encoding
+            try:
+                df = pd.read_csv(path, dtype=str, engine="python", sep=";", encoding="latin-1")
+            except Exception:
+                df = pd.read_csv(path, dtype=str, engine="python", encoding_errors="ignore")
 
         dfn = _norm_cols(df)
 
         # Documento
         doc_col = None
         for c in ["documento","cpf_cnpj","cpfcnpj","cpf","cnpj","doc"]:
-            if c in dfn.columns: doc_col = c; break
+            if c in dfn.columns:
+                doc_col = c
+                break
         if doc_col is None:
             best, best_r = None, -1
             for c in dfn.columns:
-                r = dfn[c].astype(str).map(lambda v: len(_digits(v))>=9).mean()
-                if r > best_r: best_r, best = r, c
+                r = dfn[c].astype(str).map(lambda v: len(_digits(v)) >= 9).mean()
+                if r > best_r:
+                    best_r, best = r, c
             doc_col = best
             info(f"[SOA/{aba}] doc detectado: {doc_col} (ratio={best_r:.2f})")
 
@@ -386,10 +394,12 @@ def ler_soa() -> pd.DataFrame:
         best_date_col = _pick_best_date(date_map)
         soa_date = date_map.get(best_date_col, pd.Series(pd.NaT, index=dfn.index))
 
-        # Nome (se existir na planilha)
+        # Nome (se existir)
         name_col = None
         for c in ["nome_razao_social","nome","razao_social","nome_fantasia","cliente","pessoa"]:
-            if c in dfn.columns: name_col = c; break
+            if c in dfn.columns:
+                name_col = c
+                break
         if name_col is None:
             name_col = pick_name_column(dfn, exclude={doc_col})
 
@@ -429,28 +439,28 @@ def ler_soa() -> pd.DataFrame:
         dt_E = max_dt("ERROS")        if has_E else pd.NaT
         dt_D = max_dt("DETERMINACAO") if has_D else pd.NaT
 
-        # Nome do SOA (melhor disponível no grupo)
-        nome_soa = _coalesce_name(*g.get("Nome","").astype(str).tolist())
+        # Nome consolidado do SOA
+        nome_soa = _coalesce_name(*g.get("Nome", "").astype(str).tolist())
 
-        # 1) Ativas x Baixadas pela maior data
+        # 1) Ativas x Baixadas: maior data decide
         if has_A or has_B:
             if pd.notna(dt_A) and pd.notna(dt_B):
                 if dt_A >= dt_B:
-                    return pd.Series({"SOA_Qtd": qtd_total, "SOA_Status": "NEGATIVADO",   "SOA_Data": dt_A, "Nome_SOA": nome_soa})
+                    return pd.Series({"SOA_Qtd": qtd_total, "SOA_Status": "Negativado", "SOA_Data": dt_A, "Nome_SOA": nome_soa})
                 else:
-                    return pd.Series({"SOA_Qtd": qtd_total, "SOA_Status": "BAIXADO",      "SOA_Data": dt_B, "Nome_SOA": nome_soa})
+                    return pd.Series({"SOA_Qtd": qtd_total, "SOA_Status": "Baixado", "SOA_Data": dt_B, "Nome_SOA": nome_soa})
             if has_A:
-                return pd.Series({"SOA_Qtd": qtd_total, "SOA_Status": "NEGATIVADO",       "SOA_Data": dt_A if pd.notna(dt_A) else pd.NaT, "Nome_SOA": nome_soa})
+                return pd.Series({"SOA_Qtd": qtd_total, "SOA_Status": "Negativado", "SOA_Data": dt_A if pd.notna(dt_A) else pd.NaT, "Nome_SOA": nome_soa})
             if has_B:
-                return pd.Series({"SOA_Qtd": qtd_total, "SOA_Status": "BAIXADO",          "SOA_Data": dt_B if pd.notna(dt_B) else pd.NaT, "Nome_SOA": nome_soa})
+                return pd.Series({"SOA_Qtd": qtd_total, "SOA_Status": "Baixado", "SOA_Data": dt_B if pd.notna(dt_B) else pd.NaT, "Nome_SOA": nome_soa})
 
         # 2) Sem Ativas/Baixadas -> Pendente > erro > Determinação
         if has_P:
-            return pd.Series({"SOA_Qtd": qtd_total, "SOA_Status": "PENDENTE",             "SOA_Data": dt_P if pd.notna(dt_P) else pd.NaT, "Nome_SOA": nome_soa})
+            return pd.Series({"SOA_Qtd": qtd_total, "SOA_Status": "Pendente", "SOA_Data": dt_P if pd.notna(dt_P) else pd.NaT, "Nome_SOA": nome_soa})
         if has_E:
-            return pd.Series({"SOA_Qtd": qtd_total, "SOA_Status": "ERRO",                 "SOA_Data": dt_E if pd.notna(dt_E) else pd.NaT, "Nome_SOA": nome_soa})
+            return pd.Series({"SOA_Qtd": qtd_total, "SOA_Status": "erro", "SOA_Data": dt_E if pd.notna(dt_E) else pd.NaT, "Nome_SOA": nome_soa})
         if has_D:
-            return pd.Series({"SOA_Qtd": qtd_total, "SOA_Status": "DETERMINAÇÃO",         "SOA_Data": dt_D if pd.notna(dt_D) else pd.NaT, "Nome_SOA": nome_soa})
+            return pd.Series({"SOA_Qtd": qtd_total, "SOA_Status": "Determinação", "SOA_Data": dt_D if pd.notna(dt_D) else pd.NaT, "Nome_SOA": nome_soa})
 
         # 3) Sem sinal
         return pd.Series({"SOA_Qtd": qtd_total, "SOA_Status": "", "SOA_Data": pd.NaT, "Nome_SOA": nome_soa})

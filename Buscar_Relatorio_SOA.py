@@ -1,11 +1,13 @@
+# -*- coding: utf-8 -*-
 import os
 import time
 import subprocess
 import zipfile
 import urllib.request
 import shutil
-import platform
+from pathlib import Path
 from dotenv import load_dotenv, dotenv_values
+
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.chrome.service import Service
@@ -13,16 +15,24 @@ from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 
-# ==== Atualizador automático do ChromeDriver ====
+# ==============================
+# Config fixas (URLs)
+# ==============================
+VISAO_URL = "https://portal.soawebservices.com.br/Negativacoes/VisaoGeral"
+POS_LOGIN_SINAL = (
+    By.XPATH,
+    "//span[normalize-space()='Exportar em CSV']/ancestor::*[contains(@class,'e-tbar-btn') or self::button]"
+)
+
+# ==============================
+# Atualizador automático do ChromeDriver
+# ==============================
 def instalar_chromedriver_compatível(driver_path="./chromedriver"):
-    print("\U0001f50d Verificando versão do Google Chrome instalada...")
+    print("🔍 Verificando versão do Google Chrome instalada...")
     try:
         resultado = subprocess.run(
             ["/opt/google/chrome/chrome", "--version"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            check=True
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True
         )
         versao_completa = resultado.stdout.strip().split()[-1]
         print(f"✅ Chrome instalado: versão {versao_completa}")
@@ -30,8 +40,7 @@ def instalar_chromedriver_compatível(driver_path="./chromedriver"):
         print("❌ Não foi possível obter a versão do Google Chrome:", e)
         return False
 
-    print(f"🌐 Buscando ChromeDriver compatível...")
-
+    print("🌐 Buscando ChromeDriver compatível...")
     try:
         url_zip = f"https://storage.googleapis.com/chrome-for-testing-public/{versao_completa}/linux64/chromedriver-linux64.zip"
         caminho_zip = "chromedriver.zip"
@@ -51,179 +60,245 @@ def instalar_chromedriver_compatível(driver_path="./chromedriver"):
         os.remove(caminho_zip)
         shutil.rmtree("chromedriver_temp")
         print("✅ ChromeDriver atualizado com sucesso.")
-
         return True
     except Exception as e:
         print("❌ Falha ao baixar/substituir ChromeDriver:", e)
         return False
 
-# ==== Configurações iniciais ====
-
+# ==============================
+# Setup inicial
+# ==============================
 driver_path = "./chromedriver"
 instalar_chromedriver_compatível(driver_path)
 
 dotenv_path = os.path.join(os.path.dirname(__file__), ".env")
 load_dotenv(dotenv_path)
 config = dotenv_values(dotenv_path)
-print("[DEBUG] Conteúdo carregado do .env:", config)
+print("[DEBUG] .env:", config)
 
 LOGIN = config.get("USUARIO_SOA")
 SENHA = config.get("SENHA_SOA")
 
 if not LOGIN or not SENHA:
-    print("[ERRO] Variáveis USUARIO_SOA ou SENHA_SOA não estão definidas no .env ou estão vazias.")
+    print("[ERRO] USUARIO_SOA ou SENHA_SOA ausentes/vazios no .env")
     print(f"[DEBUG] USUARIO_SOA = {LOGIN}")
     print(f"[DEBUG] SENHA_SOA = {'<vazio>' if not SENHA else '***'}")
-    exit(1)
+    raise SystemExit(1)
 
-# Pasta de download e limpeza de arquivos antigos
+# Pasta de download + limpeza
 download_dir = os.path.abspath("download")
+Path(download_dir).mkdir(parents=True, exist_ok=True)
+print(f"📁 Pasta de download pronta: {download_dir}")
 
-arquivos_csv_anteriores = [
-    "Ativas.csv", "Baixadas.csv", "Determinacao.csv", "Erros.csv", "Pendentes.csv"
-]
+for nome in ["Ativas.csv", "Baixadas.csv", "Determinacao.csv", "Erros.csv", "Pendentes.csv"]:
+    alvo = os.path.join(download_dir, nome)
+    if os.path.exists(alvo):
+        try:
+            os.remove(alvo)
+            print(f"🪚 Removido: {nome}")
+        except Exception as e:
+            print(f"⚠️ Não foi possível remover {nome}: {e}")
 
-if not os.path.exists(download_dir):
-    os.makedirs(download_dir)
-    print(f"📁 Pasta de download criada: {download_dir}")
-else:
-    print(f"📁 Pasta de download já existe: {download_dir}")
-    for nome in arquivos_csv_anteriores:
-        caminho = os.path.join(download_dir, nome)
-        if os.path.exists(caminho):
-            try:
-                os.remove(caminho)
-                print(f"🪚 Arquivo antigo removido: {nome}")
-            except Exception as e:
-                print(f"⚠️ Não foi possível remover {nome}: {e}")
-
+# ==============================
+# Chrome Options (corrigidas)
+# ==============================
 chrome_options = Options()
-chrome_options.add_experimental_option("prefs", {
+prefs = {
     "download.default_directory": download_dir,
     "download.prompt_for_download": False,
-    "directory_upgrade": True,
-    "safebrowsing.enabled": True
-})
+    "download.directory_upgrade": True,  # CORRETO
+    "safebrowsing.enabled": True,
+}
+chrome_options.add_experimental_option("prefs", prefs)
+# chrome_options.add_argument("--headless=new")  # descomente se quiser headless
+chrome_options.add_argument("--no-sandbox")
+chrome_options.add_argument("--disable-dev-shm-usage")
+chrome_options.add_argument("--window-size=1366,768")
+chrome_options.add_argument("--lang=pt-BR")
+chrome_options.add_argument("--disable-gpu")
+chrome_options.add_argument("--remote-allow-origins=*")
 
-driver = webdriver.Chrome(service=Service(driver_path), options=chrome_options)
-driver.maximize_window()
-wait = WebDriverWait(driver, 15)
+# Cria driver com logs úteis
+service = Service(driver_path)
+driver = webdriver.Chrome(service=service, options=chrome_options)
+print("[INFO] Chrome aberto.")
+print("[DEBUG] Versões:", driver.capabilities.get("browserVersion"), "|",
+      driver.capabilities.get("chrome", {}).get("chromedriverVersion"))
 
-def aguardar_download(pasta, timeout=120):
+wait = WebDriverWait(driver, 20)
+
+# ==============================
+# Helpers
+# ==============================
+def aguardar_download(pasta, timeout=180):
+    """Espera por novo .csv. Simples e confiável para grids com export síncrono."""
     print("[INFO] Aguardando novo arquivo .csv na pasta de download...")
-    arquivos_antes = set(os.listdir(pasta))
-    limite = time.time() + timeout
-
-    while time.time() < limite:
-        arquivos_agora = set(os.listdir(pasta))
-        novos = [f for f in arquivos_agora - arquivos_antes if f.endswith(".csv")]
+    inicio = time.time()
+    baseline = set(os.listdir(pasta))
+    while time.time() - inicio < timeout:
+        atuais = set(os.listdir(pasta))
+        novos = [f for f in atuais - baseline if f.lower().endswith(".csv")]
         if novos:
-            arquivo_final = os.path.join(pasta, novos[0])
-            print(f"[INFO] Novo arquivo detectado: {arquivo_final}")
-            return arquivo_final
+            caminho = os.path.join(pasta, sorted(novos)[-1])
+            print(f"[INFO] Novo arquivo: {caminho}")
+            return caminho
         time.sleep(1)
+    raise TimeoutError("[ERRO] Nenhum .csv detectado após exportação.")
 
-    raise TimeoutError("[ERRO] Nenhum novo arquivo .csv detectado após exportação.")
+def esperar_overlays_sumirem(timeout=10):
+    """Tenta aguardar overlays/spinners comuns sumirem, para evitar click intercepted."""
+    try:
+        WebDriverWait(driver, timeout).until(
+            EC.invisibility_of_element_located((By.CSS_SELECTOR, ".e-overlay, .e-spinner-pane, .blockUI, .loading, .modal-backdrop"))
+        )
+    except Exception:
+        pass
 
+# ==============================
+# Login (via Visão Geral)
+# ==============================
 def realizar_login():
-    print("[INFO] Acessando página de login...")
-    driver.get("c")
+    print("[INFO] Acessando Visão Geral...")
+    driver.get(VISAO_URL)
 
     try:
+        # Espera por UM dos dois: (a) form de login, (b) sinal de página pós-login
+        def any_ready(drv):
+            try:
+                if drv.find_elements(By.ID, "Email") and drv.find_elements(By.ID, "Senha"):
+                    return "LOGIN"  # formulário presente
+                if drv.find_elements(*POS_LOGIN_SINAL):
+                    return "OK"     # já logado na Visão Geral
+            except Exception:
+                pass
+            return False
+
+        estado = WebDriverWait(driver, 20).until(any_ready)
+        print(f"[DEBUG] Estado inicial após abrir Visão Geral: {estado}")
+
+        if estado == "OK":
+            print("[INFO] Já logado. Seguindo...")
+            return
+
+        # === Fluxo de login (form exibido) ===
         campo_email = wait.until(EC.visibility_of_element_located((By.ID, "Email")))
-        campo_email.send_keys(LOGIN)
-        print("[INFO] Campo de e-mail preenchido.")
+        campo_email.clear(); campo_email.send_keys(LOGIN)
+        print("[INFO] E-mail preenchido.")
 
         campo_senha = wait.until(EC.visibility_of_element_located((By.ID, "Senha")))
-        campo_senha.send_keys(SENHA)
-        print("[INFO] Campo de senha preenchido.")
+        campo_senha.clear(); campo_senha.send_keys(SENHA)
+        print("[INFO] Senha preenchida.")
 
-        botao_login_seguro = wait.until(EC.element_to_be_clickable((By.ID, "js-login-btn")))
-        time.sleep(1)
-        botao_login_seguro.click()
-        print("[INFO] Botão 'LoginSeguro' clicado.")
-
-        wait.until(EC.presence_of_element_located((By.ID, "btn_Responsaveis")))
-        print("[INFO] Login realizado com sucesso.")
-
-    except Exception as e:
-        print("[ERRO] Falha no processo de login:", e)
-        with open("pagina_login_erro.html", "w", encoding="utf-8") as f:
-            f.write(driver.page_source)
-        print("[DEBUG] HTML salvo como 'pagina_login_erro.html'.")
-        raise
-
-def clicar_exportar_csv(botao_id, nome_saida):
-    print(f"[INFO] Acessando aba '{botao_id}' com duplo clique...")
-    try:
-        if botao_id == "href_Erros":
-            aba = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, 'a[href="#tab_Erros"]')))
-        else:
-            aba = wait.until(EC.element_to_be_clickable((By.ID, botao_id)))
-        aba.click()
-        time.sleep(1)
-        aba.click()
-        print(f"[INFO] Aba '{botao_id}' clicada duas vezes.")
-
-        print("[INFO] Aguardando carregamento da aba...")
-        time.sleep(2)
-
-        print("[INFO] Procurando botão 'Exportar em CSV'...")
-
-        if botao_id == "btn_Financeiro":
-            botao_exportar = wait.until(EC.element_to_be_clickable((By.ID, "GridNegativacoesBaixadas_csvexport")))
-        elif botao_id == "btn_Cobranca":
-            botao_exportar = wait.until(EC.element_to_be_clickable((By.ID, "GridNegativacoesPendentes_csvexport")))
-        elif botao_id == "btn_NFSe" and nome_saida == "Determinacao.csv":
-            botao_exportar = wait.until(EC.element_to_be_clickable((By.ID, "GridNegativacoesRecusadas_csvexport")))
-        elif botao_id == "href_Erros":
-            botao_exportar = wait.until(EC.element_to_be_clickable((By.ID, "GridNegativacoesErros_csvexport")))
-        else:
-            botao_exportar = wait.until(EC.element_to_be_clickable((
-                By.XPATH,
-                "//span[text()='Exportar em CSV']/ancestor::button | //span[text()='Exportar em CSV']/ancestor::*[contains(@class, 'e-tbar-btn')]"
-            )))
-
-        driver.execute_script("arguments[0].style.border='2px solid red'", botao_exportar)
-
+        # Tente o botão 'LoginSeguro' por ID; se não houver, tente um submit do form
         try:
-            botao_exportar.click()
+            botao = wait.until(EC.element_to_be_clickable((By.ID, "js-login-btn")))
+            time.sleep(0.3)
+            botao.click()
+            print("[INFO] Botão 'LoginSeguro' clicado.")
         except Exception:
-            driver.execute_script("arguments[0].click();", botao_exportar)
+            from selenium.webdriver.common.keys import Keys
+            campo_senha.send_keys(Keys.ENTER)
+            print("[INFO] Form submetido via ENTER (fallback).")
 
-        print("[INFO] Botão 'Exportar em CSV' clicado.")
-
-        arquivo = aguardar_download(download_dir, timeout=120)
-        destino = os.path.join(download_dir, nome_saida)
-        os.rename(arquivo, destino)
-        print(f"[INFO] Arquivo renomeado para: {destino}")
+        # Aguarda cair na Visão Geral (ou qualquer elemento que prove login)
+        wait.until(EC.presence_of_element_located(POS_LOGIN_SINAL))
+        print("[INFO] Login concluído e Visão Geral carregada.")
 
     except Exception as e:
-        print(f"[ERRO] Falha ao exportar aba '{botao_id}':", e)
-        with open(f"pagina_{botao_id}_erro.html", "w", encoding="utf-8") as f:
-            f.write(driver.page_source)
-        print(f"[DEBUG] HTML salvo como 'pagina_{botao_id}_erro.html'.")
+        print("[ERRO] Falha ao abrir/logar pela Visão Geral:", e)
+        os.makedirs("output", exist_ok=True)
+        try:
+            driver.save_screenshot("output/visao_geral_login_error.png")
+        except Exception:
+            pass
+        try:
+            with open("output/visao_geral_login_error.html", "w", encoding="utf-8") as f:
+                f.write(driver.page_source)
+        except Exception:
+            pass
         raise
 
-# ===== Execução principal =====
+# ==============================
+# Export direto por grid (sem clicar abas)
+# ==============================
+def exportar_por_grid(export_id: str, nome_saida: str, fallback_tab_id: str | None = None):
+    """
+    Tenta clicar diretamente no botão de export do grid. Se não achar,
+    abre a aba fallback (uma vez) e tenta de novo.
+    """
+    print(f"[INFO] Exportando: {nome_saida} via #{export_id}")
 
+    def _tentar_click_export() -> bool:
+        try:
+            esperar_overlays_sumirem(8)
+            btn = wait.until(EC.element_to_be_clickable((By.ID, export_id)))
+            driver.execute_script("arguments[0].scrollIntoView({block:'center'});", btn)
+            time.sleep(0.2)
+            try:
+                btn.click()
+            except Exception:
+                driver.execute_script("arguments[0].click();", btn)
+            print("[INFO] 'Exportar em CSV' clicado.")
+            return True
+        except Exception:
+            return False
+
+    # 1) Tenta direto
+    if not _tentar_click_export():
+        print(f"[WARN] Botão #{export_id} não visível ainda.")
+        # 2) Fallback: abrir a aba correspondente (se fornecida) e tentar de novo
+        if fallback_tab_id:
+            print(f"[INFO] Abrindo aba fallback '{fallback_tab_id}'...")
+            try:
+                if fallback_tab_id == "href_Erros":
+                    aba = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, 'a[href=\"#tab_Erros\"]')))
+                else:
+                    aba = wait.until(EC.element_to_be_clickable((By.ID, fallback_tab_id)))
+                driver.execute_script("arguments[0].scrollIntoView({block:'center'});", aba)
+                time.sleep(0.2)
+                aba.click()
+                time.sleep(1.2)  # tempo para grid renderizar
+            except Exception as e:
+                print(f"[WARN] Não consegui abrir a aba '{fallback_tab_id}': {e}")
+
+        if not _tentar_click_export():
+            raise RuntimeError(f"Não foi possível clicar no export #{export_id} (mesmo após fallback).")
+
+    # 3) Espera o download aparecer e renomeia
+    arquivo = aguardar_download(download_dir, timeout=180)
+    destino = os.path.join(download_dir, nome_saida)
+    try:
+        if os.path.exists(destino):
+            os.remove(destino)
+    except Exception:
+        base, ext = os.path.splitext(destino)
+        destino = f"{base}_{int(time.time())}{ext}"
+    os.rename(arquivo, destino)
+    print(f"[INFO] CSV salvo: {destino}")
+
+# ==============================
+# Execução principal
+# ==============================
 try:
     realizar_login()
 
-    abas = [
-        ("btn_Responsaveis", "Ativas.csv"),
-        ("btn_Financeiro", "Baixadas.csv"),
-        ("btn_Cobranca", "Pendentes.csv"),
-        ("btn_NFSe", "Determinacao.csv"),
-        ("href_Erros", "Erros.csv")
+    targets = [
+        # export_id                            , arquivo            , aba_fallback (se precisar)
+        ("GridNegativacoesAtivas_csvexport",     "Ativas.csv",        "btn_Responsaveis"),
+        ("GridNegativacoesBaixadas_csvexport",   "Baixadas.csv",      "btn_Financeiro"),
+        ("GridNegativacoesPendentes_csvexport",  "Pendentes.csv",     "btn_Cobranca"),
+        ("GridNegativacoesRecusadas_csvexport",  "Determinacao.csv",  "btn_NFSe"),
+        ("GridNegativacoesErros_csvexport",      "Erros.csv",         "href_Erros"),
     ]
 
-    for aba_id, nome_saida in abas:
-        clicar_exportar_csv(aba_id, nome_saida)
+    for export_id, nome_saida, fallback_tab in targets:
+        exportar_por_grid(export_id, nome_saida, fallback_tab)
 
 except Exception as e:
     print(f"[ERRO GERAL] {e}")
-
 finally:
-    driver.quit()
+    try:
+        driver.quit()
+    except Exception:
+        pass
     print("[INFO] Processo concluído.")
