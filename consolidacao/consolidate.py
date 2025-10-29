@@ -1,4 +1,11 @@
 # === consolidado.py (trechos principais) =====================================
+# Permite executar tanto com `python -m consolidacao.consolidate` quanto
+# diretamente com `python consolidacao/consolidate.py` (ajusta __package__/sys.path).
+import os, sys
+if __name__ == "__main__" and (__package__ is None or __package__ == ""):
+    sys.path.append(os.path.dirname(os.path.dirname(__file__)))
+    __package__ = "consolidacao"
+
 import pandas as pd
 from pathlib import Path
 from .config import DOWNLOAD_DIR, OUTPUT_DIR, OUT_XLSX, ENGINE_WRITE, CONSOLIDADO_STYLE
