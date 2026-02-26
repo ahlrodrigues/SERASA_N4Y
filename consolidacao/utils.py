@@ -56,11 +56,22 @@ def pick_name_column(df: pd.DataFrame, exclude=()):
         ]):
             continue
         s = df[c].astype(str).fillna("")
-        if (s == "").mean() > 0.90: continue
-        letters = s.map(lambda v: 1 if _re.search(r"[A-Za-zÀ-ÿ]{3,}", v) else 0).mean()
-        tokens  = s.map(lambda v: len([t for t in _re.split(r"\s+", v.strip()) if t])).mean()
-        uniq    = s.nunique(dropna=True) / max(1, (s != "").sum())
-        avglen  = s.map(len).mean()
+        empty_ratio = (s == "").astype(float).mean()
+        if empty_ratio > 0.90:
+            continue
+
+        # Pandas StringDtype pode propagar dtype "string" em map/apply; força numerico
+        letters_s = s.map(lambda v: 1 if _re.search(r"[A-Za-zÀ-ÿ]{3,}", v) else 0)
+        letters = pd.to_numeric(letters_s, errors="coerce").fillna(0.0).mean()
+
+        tokens_s = s.map(lambda v: len([t for t in _re.split(r"\s+", v.strip()) if t]))
+        tokens = pd.to_numeric(tokens_s, errors="coerce").fillna(0.0).mean()
+
+        nonempty = (s != "").sum()
+        uniq = s.nunique(dropna=True) / max(1, nonempty)
+
+        avglen_s = s.map(len)
+        avglen = pd.to_numeric(avglen_s, errors="coerce").fillna(0.0).mean()
         length_penalty = 1.0 if 5 <= avglen <= 60 else 0.6
         token_bonus = min(tokens/2, 1.0)
         score = letters * 0.6 + token_bonus * 0.2 + uniq * 0.2
