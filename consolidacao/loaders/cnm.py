@@ -65,7 +65,9 @@ def ler_cnm() -> pd.DataFrame:
         df = pd.read_excel(CNM_STD_XLSX)
         df["Documento"] = df["Documento"].astype(str).map(_digits)
         df = df[_valid_doc_mask(df["Documento"])].copy()
-        df["Nome"] = df.get("Nome", "").astype(str).str.strip()
+        if "Nome" not in df.columns:
+            df["Nome"] = ""
+        df["Nome"] = df["Nome"].fillna("").astype(str).str.strip()
 
         # ✅ Troca Tipo -> CNM_TIPO
         df["CNM_TIPO"] = df.get("CNM_TIPO",

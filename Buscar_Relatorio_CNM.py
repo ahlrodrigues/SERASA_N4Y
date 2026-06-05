@@ -122,7 +122,7 @@ def posprocessar_cnm(caminho_xlsx: str, saida_xlsx_standard: str):
         return None
 
     col_doc  = pick(aliases["documento"])
-    col_nome = pick(aliases["nome"])  or "nome"
+    col_nome = pick(aliases["nome"])
     col_op   = pick(aliases["operacao"]) or "operacao"
     col_tipo = pick(aliases["tipo"]) or "tipo"
 
@@ -133,6 +133,11 @@ def posprocessar_cnm(caminho_xlsx: str, saida_xlsx_standard: str):
             if r > best_ratio: best_ratio, best_col = r, c
         col_doc = best_col
         print(f"ℹ️ Coluna 'documento' detectada por amostragem: {col_doc} (ratio={best_ratio:.2f})")
+
+    if col_nome is None:
+        df["nome"] = ""
+        col_nome = "nome"
+        print("⚠️ Nenhuma coluna de nome encontrada; criando 'nome' vazia.")
 
     out = pd.DataFrame({
         "Documento": df[col_doc].astype(str).map(_as_digits),  # aceita CPF e CNPJ
